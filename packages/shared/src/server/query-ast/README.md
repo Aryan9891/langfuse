@@ -98,9 +98,12 @@ suffix to run there. Promote it to a required check once it has proven stable.
   `events_core` to read the truncated copy on purpose; `events_core` /
   `events_full` stay selectable by name, which is also the override for a
   shape the pass rejects.
-- **Function and aggregate names must be plain identifiers.**
-  The compiler writes them verbatim, so anything else fails to compile.
-  `collate` is not supported.
+- **Identifiers, function and aggregate names must be plain identifiers**
+  (`[A-Za-z_][A-Za-z0-9_]*`). The compiler writes them unquoted, so anything
+  else fails to compile. This covers columns, tables, aliases, CTE names,
+  `sql.ref` and `sql.id`; `sql.ref("e.*")` is rejected too, write
+  `selectAll("e")`. A positive integer after a qualifier (`x.1`) is tuple
+  element access and compiles as is. `collate` is not supported.
 - **Never filter `is_deleted` on a physical table yourself.** Tables that
   declare `softDelete` in the registry (`events_core`, `events_full`) get
   `is_deleted = 0` on every FROM/JOIN. A latest-version read (ordered by
