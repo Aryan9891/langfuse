@@ -650,6 +650,7 @@ async function sendClickhouseQuery<F extends DataFormat>(opts: {
   format: F;
   span: Span;
   queryId?: string;
+  abortSignal?: AbortSignal;
 }) {
   const normalizedTags = normalizeClickHouseQueryTags(opts.tags);
   const res = await clickhouseClient(
@@ -661,6 +662,7 @@ async function sendClickhouseQuery<F extends DataFormat>(opts: {
     query_params: opts.params,
     use_multipart_params_auto: opts.useMultipartParamsAuto,
     ...(opts.queryId ? { query_id: opts.queryId } : {}),
+    ...(opts.abortSignal ? { abort_signal: opts.abortSignal } : {}),
     clickhouse_settings: {
       ...opts.clickhouseSettings,
       log_comment: JSON.stringify(normalizedTags),
@@ -692,6 +694,13 @@ function isRetryableError(error: unknown): boolean {
   return CLICKHOUSE_NETWORK_ERROR_PATTERNS.some((pattern) =>
     errorMessage.includes(pattern),
   );
+}
+
+export class ClickHouseQueryAbortedError extends Error {
+  constructor(cause?: unknown) {
+    super("ClickHouse query aborted", { cause });
+    this.name = "ClickHouseQueryAbortedError";
+  }
 }
 
 export async function queryClickhouse<T>(
@@ -797,7 +806,7 @@ export async function queryClickhouse<T>(
 }
 
 export async function* queryClickhouseWithProgress<T>(
-  opts: ClickhouseQueryOpts,
+  opts: ClickhouseQueryOpts & { abortSignal?: AbortSignal },
 ): AsyncGenerator<RowOrProgress<T>> {
   if (!opts.allowLegacyEventsRead) assertNoLegacyEventsRead(opts.query);
   const normalizedTags = normalizeClickHouseQueryTags(opts.tags);
@@ -812,6 +821,7 @@ export async function* queryClickhouseWithProgress<T>(
   const queryId = randomUUID();
 
   try {
+    opts.abortSignal?.throwIfAborted();
     setSpanQueryAttributes(span, opts.query);
     span.setAttribute("ch.queryId", queryId);
 
@@ -842,6 +852,9 @@ export async function* queryClickhouseWithProgress<T>(
       }
     }
   } catch (error) {
+    if (opts.abortSignal?.aborted) {
+      throw new ClickHouseQueryAbortedError(error);
+    }
     if (error instanceof ClickHouseResourceError) {
       const enriched = enrichWithQueryId(error, queryId);
       throw enriched === error

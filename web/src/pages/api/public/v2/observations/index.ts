@@ -1,4 +1,4 @@
-import { getObservationsV2FromEventsTableForPublicApi } from "@langfuse/shared/src/server";
+import { getObservationsV2PageFromEventsTableForPublicApi } from "@langfuse/shared/src/server";
 import { LangfuseNotFoundError } from "@langfuse/shared";
 
 import { withMiddlewares } from "@/src/features/public-api/server/withMiddlewares";
@@ -76,18 +76,13 @@ export default withMiddlewares({
         expandMetadataKeys,
       };
 
-      // Fetch observations from events table with field groups applied at query time
-      const items =
-        await getObservationsV2FromEventsTableForPublicApi(filterProps);
-
-      // Determine if there are more results (we fetched limit+1)
-      const hasMore = items.length > query.limit;
-      const dataToReturn = hasMore ? items.slice(0, query.limit) : items;
+      const { items, cursor } =
+        await getObservationsV2PageFromEventsTableForPublicApi(filterProps);
 
       // Normalize for the wire format:
       // - empty parent_observation_id -> null (v1 parity)
       // - Decimal price fields -> string (preserves original v2 wire format; v1 emits numbers via .toNumber())
-      const transformedItems = dataToReturn.map((item) => ({
+      const transformedItems = items.map((item) => ({
         ...item,
         parentObservationId:
           item.parentObservationId === "" ? null : item.parentObservationId,
@@ -97,22 +92,9 @@ export default withMiddlewares({
         totalPrice: item.totalPrice?.toString() ?? null,
       }));
 
-      // Generate cursor if there are more results
-      const lastItemIdx = dataToReturn.length - 1;
-      const meta =
-        hasMore && dataToReturn.length > 0
-          ? {
-              cursor: encodeCursor({
-                lastStartTimeTo: dataToReturn[lastItemIdx].startTime,
-                lastTraceId: dataToReturn[lastItemIdx].traceId ?? "",
-                lastId: dataToReturn[lastItemIdx].id,
-              }),
-            }
-          : {};
-
       return {
         data: transformedItems,
-        meta,
+        meta: cursor ? { cursor: encodeCursor(cursor) } : {},
       };
     },
   }),
