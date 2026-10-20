@@ -198,7 +198,8 @@ import type {
 const OBSERVATIONS_SCAN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const OBSERVATIONS_SCAN_BUDGET_MS = 25_000;
 const OBSERVATIONS_SCAN_ROW_BUDGET = 5_000_000;
-const OBSERVATIONS_SPARSE_WINDOW_ROWS = 1_000_000;
+const OBSERVATIONS_QUERY_OVERHEAD_MS = 3_000;
+const OBSERVATIONS_MS_PER_GB = 1_500;
 
 /** xxHash32('CUR00254FG5s') = 0; with id '', the tuple excludes all boundary rows. */
 const OBSERVATIONS_TIME_CURSOR_TRACE_ID = "CUR00254FG5s";
@@ -1920,12 +1921,14 @@ async function scanObservationWindows(
   let records: EventsObservationQueryResult[] = [];
   let cursor: PublicApiObservationsQuery["cursor"];
   let windows = 0;
-  let windowMs = OBSERVATIONS_SCAN_WINDOW_MS;
+  let window: { durationMs: number; estimatedMs?: number } | undefined = {
+    durationMs: OBSERVATIONS_SCAN_WINDOW_MS,
+  };
   /** An omitted upper bound stays open on the first query for future timestamps. */
   let upper = to ?? Math.max(Date.now(), from);
-  while (true) {
+  while (window !== undefined) {
     const windowStarted = performance.now();
-    const lower = Math.max(from, upper - windowMs);
+    const lower = Math.max(from, upper - window.durationMs);
     const result = await queryObservationWindow(
       opts,
       records.length,
@@ -1933,6 +1936,7 @@ async function scanObservationWindows(
         from: new Date(lower),
         to: to === undefined ? undefined : new Date(upper),
         inclusiveTo: windows === 0,
+        estimatedMs: window.estimatedMs,
       },
       scan,
       windows,
@@ -1949,18 +1953,12 @@ async function scanObservationWindows(
       break;
     }
     cursor = observationTimeCursor(lower);
-    if (
-      shouldStopObservationsScan(
-        scan,
-        result.readRows,
-        performance.now() - windowStarted,
-      )
-    )
-      break;
-    windowMs = nextObservationsWindowSize(
-      windowMs,
-      result.readRows,
-      scan.remainingMs(),
+    window = planNextObservationsWindow(
+      upper - lower,
+      lower - from,
+      result,
+      performance.now() - windowStarted,
+      scan,
     );
     upper = lower;
     to = lower;
@@ -1971,29 +1969,53 @@ async function scanObservationWindows(
 async function queryObservationWindow(
   opts: PublicApiObservationsQuery,
   collected: number,
-  window: { from: Date; to?: Date; inclusiveTo: boolean },
+  window: {
+    from: Date;
+    to?: Date;
+    inclusiveTo: boolean;
+    estimatedMs?: number;
+  },
   scan: ObservationsScan,
   completedWindows: number,
 ) {
-  try {
-    return await scan.query<EventsObservationQueryResult>(
-      buildObservationsV2Query(
-        { ...opts, limit: opts.limit - collected },
-        {},
-        window,
-      ),
-    );
-  } catch (error) {
-    /** Only completed windows may advance the cursor on timeout. */
-    if (
-      completedWindows > 0 &&
-      error instanceof ClickHouseResourceError &&
-      error.errorType === "TIMEOUT"
-    ) {
-      return undefined;
-    }
-    throw error;
-  }
+  return instrumentAsync(
+    { name: "observations-v2-scan-window" },
+    async (span) => {
+      const started = performance.now();
+      if (window.estimatedMs !== undefined) {
+        span.setAttribute("observations.scan.estimated_ms", window.estimatedMs);
+      }
+      try {
+        const result = await scan.query<EventsObservationQueryResult>(
+          buildObservationsV2Query(
+            { ...opts, limit: opts.limit - collected },
+            {},
+            window,
+          ),
+        );
+        span.setAttribute("observations.scan.completed", true);
+        span.setAttribute("observations.scan.read_bytes", result.readBytes);
+        if (result.readRows !== undefined)
+          span.setAttribute("observations.scan.read_rows", result.readRows);
+        return result;
+      } catch (error) {
+        /** Only completed windows may advance the cursor on timeout. */
+        if (
+          completedWindows > 0 &&
+          error instanceof ClickHouseResourceError &&
+          error.errorType === "TIMEOUT"
+        ) {
+          return undefined;
+        }
+        throw error;
+      } finally {
+        span.setAttribute(
+          "observations.scan.elapsed_ms",
+          performance.now() - started,
+        );
+      }
+    },
+  );
 }
 
 function observationRowCursor(last: EventsObservationQueryResult) {
@@ -2012,30 +2034,42 @@ function observationTimeCursor(lower: number) {
   };
 }
 
-function shouldStopObservationsScan(
-  scan: ObservationsScan,
-  lastQueryRows: number | undefined,
-  lastQueryMs: number,
-) {
-  return (
-    scan.remainingMs() <= Math.max(1_000, lastQueryMs) ||
-    scan.readRows() + (lastQueryRows ?? 0) >= OBSERVATIONS_SCAN_ROW_BUDGET
-  );
-}
-
-function nextObservationsWindowSize(
+function planNextObservationsWindow(
   windowMs: number,
-  readRows: number | undefined,
-  remainingMs: number,
+  remainingRangeMs: number,
+  last: { readRows: number | undefined; readBytes: number },
+  elapsedMs: number,
+  scan: ObservationsScan,
 ) {
-  if (
-    readRows !== undefined &&
-    readRows < OBSERVATIONS_SPARSE_WINDOW_ROWS &&
-    remainingMs >= OBSERVATIONS_SCAN_BUDGET_MS / 2
-  ) {
-    return windowMs * 4;
-  }
-  return OBSERVATIONS_SCAN_WINDOW_MS;
+  const remainingMs = scan.remainingMs() - OBSERVATIONS_QUERY_OVERHEAD_MS;
+  const remainingRows = OBSERVATIONS_SCAN_ROW_BUDGET - scan.readRows();
+  if (remainingMs <= 0 || remainingRows <= 0) return undefined;
+
+  /** Client wall time includes retries and stream consumption; GB is decimal. */
+  const costMs = Math.max(
+    elapsedMs,
+    (last.readBytes / 1e9) * OBSERVATIONS_MS_PER_GB,
+  );
+  const timeMultiplier = costMs > 0 ? remainingMs / costMs : Infinity;
+  const rowMultiplier =
+    last.readRows !== undefined && last.readRows > 0
+      ? remainingRows / last.readRows
+      : Infinity;
+  /** Missing statistics or empty scans cannot justify unrestricted growth. */
+  let growthLimit = Infinity;
+  if (last.readRows === undefined) growthLimit = 1;
+  else if (last.readRows === 0 && last.readBytes === 0) growthLimit = 4;
+
+  const durationMs = Math.min(
+    remainingRangeMs,
+    Math.floor(windowMs * Math.min(timeMultiplier, rowMultiplier, growthLimit)),
+  );
+  if (durationMs < 1) return undefined;
+  return {
+    durationMs,
+    estimatedMs:
+      OBSERVATIONS_QUERY_OVERHEAD_MS + (durationMs / windowMs) * costMs,
+  };
 }
 
 /** Own the deadline and cumulative work counters for all queries in one page. */
@@ -2067,6 +2101,7 @@ function createObservationsScan(projectId: string) {
       return {
         rows,
         readRows: queryRows ?? (rows.length === 0 ? 0 : undefined),
+        readBytes: queryBytes,
       };
     } catch (error) {
       if (error instanceof ClickHouseQueryAbortedError) {

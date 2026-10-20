@@ -143,8 +143,9 @@ describe("getObservationsV2FromEventsTableForPublicApi query shape", () => {
   it("returns a continuation after a completed empty window exhausts the scan budget", async () => {
     // Progress counters are cumulative within one query. The delta between
     // these events is 1M, so the first window must not exhaust the 5M budget.
+    vi.spyOn(performance, "now").mockReturnValue(0);
     mockProgressQuery(progressEvent(1_000_000), progressEvent(2_000_000));
-    mockProgressQuery(progressEvent(2_000_000));
+    mockProgressQuery(progressEvent(3_000_000));
 
     const page = await getObservationsV2PageFromEventsTableForPublicApi({
       ...baseOpts,
@@ -154,7 +155,7 @@ describe("getObservationsV2FromEventsTableForPublicApi query shape", () => {
 
     expect(page.items).toEqual([]);
     expect(page.cursor).toEqual({
-      lastStartTimeTo: new Date("2026-10-05T00:00:00.000Z"),
+      lastStartTimeTo: new Date("2026-10-01T12:00:00.000Z"),
       lastTraceId: "CUR00254FG5s",
       lastId: "",
     });
@@ -168,7 +169,7 @@ describe("getObservationsV2FromEventsTableForPublicApi query shape", () => {
     expect(
       mockQueryClickhouseWithProgress.mock.calls[1][0].params,
     ).toMatchObject({
-      scanFrom: "2026-10-05 00:00:00.000",
+      scanFrom: "2026-10-01 12:00:00.000",
       scanTo: "2026-10-12 00:00:00.000",
     });
   });
@@ -177,7 +178,7 @@ describe("getObservationsV2FromEventsTableForPublicApi query shape", () => {
     mockProgressQuery(
       rowEvent(observation("newer", "2026-10-12 00:00:00.000")),
     );
-    mockProgressQuery();
+    mockProgressQuery(progressEvent(2_500_000));
     mockProgressQuery(
       rowEvent(observation("older", "2026-10-04 00:00:00.000")),
       rowEvent(observation("lookahead", "2026-10-02 00:00:00.000")),
@@ -238,24 +239,29 @@ describe("getObservationsV2FromEventsTableForPublicApi query shape", () => {
     expect(call.query).toContain("FROM base");
   });
 
-  it("stops before another window when the elapsed time approaches the deadline", async () => {
-    const clock = vi.spyOn(performance, "now").mockReturnValue(0);
-    mockQueryClickhouseWithProgress.mockImplementationOnce(async function* () {
-      clock.mockReturnValue(24_500);
-      yield rowEvent(observation("newer", "2026-10-13 00:00:00.000"));
-    });
+  it.each([22_000, 24_500])(
+    "stops when only the fixed overhead remains: %i ms elapsed",
+    async (elapsed) => {
+      const clock = vi.spyOn(performance, "now").mockReturnValue(0);
+      mockQueryClickhouseWithProgress.mockImplementationOnce(
+        async function* () {
+          clock.mockReturnValue(elapsed);
+          yield rowEvent(observation("newer", "2026-10-13 00:00:00.000"));
+        },
+      );
 
-    const page = await getObservationsV2PageFromEventsTableForPublicApi({
-      ...boundedOpts,
-      fields: ["core"],
-    });
+      const page = await getObservationsV2PageFromEventsTableForPublicApi({
+        ...boundedOpts,
+        fields: ["core"],
+      });
 
-    expect(page.items.map((row) => row.id)).toEqual(["newer"]);
-    expect(page.cursor?.lastStartTimeTo).toEqual(
-      new Date("2026-10-12T00:00:00Z"),
-    );
-    expect(mockQueryClickhouseWithProgress).toHaveBeenCalledTimes(1);
-  });
+      expect(page.items.map((row) => row.id)).toEqual(["newer"]);
+      expect(page.cursor?.lastStartTimeTo).toEqual(
+        new Date("2026-10-12T00:00:00Z"),
+      );
+      expect(mockQueryClickhouseWithProgress).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("returns the last completed boundary when the shared deadline expires", async () => {
     const clock = vi.spyOn(performance, "now").mockReturnValue(0);
@@ -313,52 +319,56 @@ describe("getObservationsV2FromEventsTableForPublicApi query shape", () => {
 
   it.each([
     {
-      scanned: 999_999,
-      elapsed: 12_499,
-      lower: "2099-11-27 00:00:00.000",
-      hasRow: false,
-    },
-    {
-      scanned: 1_000_000,
+      name: "byte estimate",
+      scanned: 100_000,
+      bytes: 1e9,
       elapsed: 1_000,
-      lower: "2099-12-18 00:00:00.000",
-      hasRow: false,
+      days: 98,
     },
     {
-      scanned: 0,
-      elapsed: 12_500,
-      lower: "2099-11-27 00:00:00.000",
-      hasRow: false,
+      name: "client wall time",
+      scanned: 100_000,
+      bytes: 1e9,
+      elapsed: 10_000,
+      days: 8.4,
     },
     {
-      scanned: 0,
-      elapsed: 12_501,
-      lower: "2099-12-18 00:00:00.000",
-      hasRow: false,
+      name: "remaining row budget",
+      scanned: 2_000_000,
+      bytes: 1e9,
+      elapsed: 1_000,
+      days: 10.5,
     },
     {
+      name: "shrinking an expensive window",
+      scanned: 100_000,
+      bytes: 10e9,
+      elapsed: 10_000,
+      days: 5.6,
+    },
+    {
+      name: "empty window without progress",
       scanned: undefined,
-      elapsed: 1_000,
-      lower: "2099-11-27 00:00:00.000",
-      hasRow: false,
+      bytes: 0,
+      elapsed: 0,
+      days: 28,
     },
     {
+      name: "missing statistics with data",
       scanned: undefined,
+      bytes: 0,
       elapsed: 1_000,
-      lower: "2099-12-18 00:00:00.000",
+      days: 7,
       hasRow: true,
     },
   ])(
-    "widens sparse future windows only with measured headroom: $scanned scanned, $elapsed ms, data: $hasRow",
-    async ({ scanned, elapsed, lower, hasRow }) => {
-      const clock = vi
-        .spyOn(performance, "now")
-        .mockReturnValueOnce(0)
-        .mockReturnValue(Math.max(0, elapsed - 1_000));
+    "sizes the next future window using $name",
+    async ({ scanned, bytes, elapsed, days, hasRow }) => {
+      const clock = vi.spyOn(performance, "now").mockReturnValue(0);
       mockQueryClickhouseWithProgress.mockImplementationOnce(
         async function* () {
           clock.mockReturnValue(elapsed);
-          if (scanned !== undefined) yield progressEvent(scanned);
+          if (scanned !== undefined) yield progressEvent(scanned, bytes);
           if (hasRow)
             yield rowEvent(observation("newest", "2099-12-26 00:00:00.000"));
         },
@@ -379,21 +389,25 @@ describe("getObservationsV2FromEventsTableForPublicApi query shape", () => {
       );
       const calls = mockQueryClickhouseWithProgress.mock.calls;
       expect(calls).toHaveLength(2);
+      const upper = Date.parse("2099-12-25T00:00:00Z");
+      const lower = new Date(upper - days * 86_400_000);
       expect(calls[0][0].params.scanFrom).toBe("2099-12-25 00:00:00.000");
-      expect(calls[1][0].params.scanFrom).toBe(lower);
-      expect(calls[1][0].params.scanTo).toBe("2099-12-25 00:00:00.000");
-      expect(page.cursor?.lastStartTimeTo).toEqual(
-        new Date(lower.replace(" ", "T") + "Z"),
+      expect(calls[1][0].params.scanFrom).toBe(
+        lower.toISOString().replace("T", " ").replace("Z", ""),
       );
+      expect(calls[1][0].params.scanTo).toBe("2099-12-25 00:00:00.000");
+      expect(page.cursor?.lastStartTimeTo).toEqual(lower);
     },
   );
 
-  it("widens across sparse history and shrinks after an expensive scan", async () => {
+  it("recalibrates after crossing empty history into a byte-heavy window", async () => {
     const clock = vi.spyOn(performance, "now").mockReturnValue(0);
     mockProgressQuery(rowEvent({ start_time: "1970-01-01 00:00:00.000" }));
     mockProgressQuery(progressEvent(0));
-    mockProgressQuery(progressEvent(0));
-    mockProgressQuery(progressEvent(1_000_000));
+    mockQueryClickhouseWithProgress.mockImplementationOnce(async function* () {
+      clock.mockReturnValue(10_000);
+      yield progressEvent(1_000_000, 20e9);
+    });
     mockQueryClickhouseWithProgress.mockImplementationOnce(async function* () {
       clock.mockReturnValue(24_500);
       yield progressEvent(0);
@@ -404,7 +418,7 @@ describe("getObservationsV2FromEventsTableForPublicApi query shape", () => {
       toStartTime: "2026-10-19T00:00:00Z",
     });
     const scans = mockQueryClickhouseWithProgress.mock.calls.slice(1);
-    expect(scans).toHaveLength(4);
+    expect(scans).toHaveLength(3);
     expect(
       scans.map(
         ([opts]) =>
@@ -412,7 +426,7 @@ describe("getObservationsV2FromEventsTableForPublicApi query shape", () => {
             Date.parse(opts.params.scanFrom.replace(" ", "T") + "Z")) /
           86_400_000,
       ),
-    ).toEqual([7, 28, 112, 7]);
+    ).toEqual([7, 28, 11.2]);
   });
 
   it.each([
