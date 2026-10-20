@@ -1299,6 +1299,84 @@ json_literal    = "<price_per_mtok>e-6"
   the October 9 2026 entry above) — do not conflate the two shutdown dates or
   model lists when a future audit processes either one.
 
+- **October 20 2026 audit: full re-fetch found no price or catalog drift; a new
+  OpenAI "GPT-5 and o3" deprecation batch found (not yet actionable); Gemini
+  3.5/3.7 Flash deprecation confirmed real but still shutdown-date-less;
+  Claude Haiku 4.5's "not sooner than" floor date passed without a formal
+  notice** — Re-fetched the full Anthropic pricing page (model table, cache-hits
+  footnote, Fast mode, Batch, Long context, and Tool use sections) and
+  `model-deprecations` page, the OpenAI aggregate Standard pricing table, the
+  full `deprecations` page (with follow-up verbatim-quote fetches), the
+  `models/all` catalog, `gpt-5-chat-latest`'s dedicated page, the Gemini 3.x
+  pricing page (3.1-pro-preview, 3.5-flash-lite, 3.1-flash-lite,
+  3-flash-preview), the Gemini 2.5-family pricing page, the Gemini models
+  catalog and deprecations page, and the TypeSafe Jev models page (confirmed
+  `jev-1.14.0` alongside `jev-1.13.0`, both $42/Btok input, output free — no
+  change). Every price already in the file matched verbatim; no updates were
+  needed. Three findings:
+  1. **New OpenAI deprecation batch: "GPT-5 and o3 model deprecations"
+     (announced 2026-06-11), shutdown December 11, 2026** — confirmed via two
+     independent verbatim-quote fetches of
+     `developers.openai.com/api/docs/deprecations`: `gpt-5-2025-08-07` →
+     `gpt-5.6-sol`, `gpt-5-mini-2025-08-07` → `gpt-5.6-terra`,
+     `gpt-5-nano-2025-08-07` → `gpt-5.6-luna`, `gpt-5-pro-2025-10-06` →
+     `gpt-5.6-sol` (`reasoning.mode: pro`), `o3-2025-04-16` → `gpt-5.6-sol`,
+     `o3-pro-2025-06-10` → `gpt-5.6-sol` (`reasoning.mode: pro`). Of these,
+     `gpt-5`/`gpt-5-2025-08-07`, `gpt-5-mini`/`gpt-5-mini-2025-08-07`,
+     `gpt-5-nano`/`gpt-5-nano-2025-08-07`, and `o3`/`o3-2025-04-16` are
+     currently in `openAIModels`; `gpt-5-pro`/`gpt-5-pro-2025-10-06` and
+     `o3-pro`/`o3-pro-2025-06-10` are not in the array, so they have no
+     selectable-array action regardless of date. December 11, 2026 is 52 days
+     after this run's date (October 20, 2026) — not yet actionable under the
+     removal criteria. **Re-check this page on or after December 11, 2026 and
+     remove `gpt-5`, `gpt-5-2025-08-07`, `gpt-5-mini`, `gpt-5-mini-2025-08-07`,
+     `gpt-5-nano`, `gpt-5-nano-2025-08-07`, `o3`, and `o3-2025-04-16` from
+     `openAIModels` once the page confirms the shutdown has passed** (keep
+     their pricing entries). This is a separate, later batch from both the
+     already-tracked October 23, 2026 "Legacy GPT model snapshots" batch and
+     the January 14, 2027 "GPT-4 series" batch (see the October 9 and October
+     14 2026 entries above) — three distinct, differently-dated OpenAI
+     retirement batches are now pending; do not conflate their model lists or
+     dates when a future audit processes any one of them. This run also
+     reconfirmed the October 23, 2026 batch is still grouped under the page's
+     "Past deprecations" heading despite its date still being 3 days in the
+     future relative to this run — the same announcement-date-vs-shutdown-date
+     section-header quirk documented in the October 9 2026 entry above,
+     now independently reconfirmed on a second batch. Always compare the
+     literal shutdown date against the audit's own run date, never trust the
+     section heading alone.
+  2. **Gemini deprecations page confirms `gemini-3.5-flash` and
+     `gemini-3.7-flash` have real deprecation notices, but neither has a
+     shutdown date yet** — `ai.google.dev/gemini-api/docs/deprecations` lists
+     `gemini-3.5-flash` (deprecated May 19, 2026, recommended replacement
+     `gemini-3.6-flash`) and `gemini-3.7-flash` (deprecated August 13, 2026,
+     recommended replacement `gemini-3.8-flash`), both with shutdown date
+     "N/A". This refines the October 13 2026 "pricing-page single-model fetch
+     gap" finding: the two models' absence from `ai.google.dev/gemini-api/docs/pricing`
+     single-model fetches is not purely a fetch-extraction artifact — they are
+     genuinely deprecated — but since Google has not published a shutdown
+     date, neither meets the removal criteria in `automated-audit.md` yet
+     (deprecated-with-no-retirement-date keeps the entry, same rule as
+     Anthropic's "Deprecated" tier before a firm retirement date lands).
+     Left unchanged in `vertexAIModels` and `googleAIStudioModels`. Note:
+     `gemini-3.5-flash` is the **first (default) entry** in `vertexAIModels`
+     — if Google ever publishes a shutdown date for it, a future audit must
+     pick a new `vertexAIModels` default per the removal-criteria exception
+     for a deprecated-with-announced-date first entry, not simply drop it.
+  3. **Claude Haiku 4.5's "not sooner than October 15, 2026" floor date has
+     passed with no formal deprecation notice** — re-fetched
+     `model-deprecations`'s "Model status" table: `claude-haiku-4-5-20251001`
+     is still `Active`, `Deprecated: N/A`, tentative retirement still reads
+     "Not sooner than October 15, 2026" verbatim (unchanged text, now in the
+     past). This resolves prior audits' "one day away" / "still in the
+     future" flags: the floor date passing by itself does not trigger
+     anything — Anthropic's "Active" status with `Deprecated: N/A` is the
+     operative signal, not the tentative-retirement floor date. No action
+     until Anthropic actually sets `Current state: Deprecated` with a real
+     retirement date. `claude-sonnet-4-5-20250929` is still `Deprecated`
+     (retirement November 30, 2026, 41 days away at this run) — also not yet
+     actionable.
+
 ## Provider Usage Keys
 
 Use [provider-usage-key-matrix.md](provider-usage-key-matrix.md) as the single
