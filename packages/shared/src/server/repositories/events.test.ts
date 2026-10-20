@@ -12,6 +12,12 @@ vi.mock("./clickhouse", async () => {
 
   return {
     ClickHouseResourceError: class extends Error {
+      constructor(
+        public readonly errorType: string,
+        error: Error,
+      ) {
+        super(error.message);
+      }
       static wrapIfResourceError(error: Error) {
         return error;
       }
@@ -39,7 +45,10 @@ import {
   getObservationsV2FromEventsTableForPublicApi,
   getObservationsV2PageFromEventsTableForPublicApi,
 } from "./events";
-import { ClickHouseQueryAbortedError } from "./clickhouse";
+import {
+  ClickHouseQueryAbortedError,
+  ClickHouseResourceError,
+} from "./clickhouse";
 import { type EventsTableFilterState } from "../../types";
 
 const inputContainsFilter: EventsTableFilterState = [
@@ -295,12 +304,117 @@ describe("getObservationsV2FromEventsTableForPublicApi query shape", () => {
     expect(scan.params.scanTo).toBeUndefined();
   });
 
+  it("maps an aborted oldest-row lookup to the API timeout error", async () => {
+    mockProgressError(new ClickHouseQueryAbortedError());
+    const request = getObservationsV2PageFromEventsTableForPublicApi(baseOpts);
+    await expect(request).rejects.toBeInstanceOf(ClickHouseResourceError);
+    await expect(request).rejects.toMatchObject({ errorType: "TIMEOUT" });
+  });
+
+  it.each([
+    {
+      scanned: 49_999,
+      elapsed: 12_499,
+      lower: "2099-11-27 00:00:00.000",
+      hasRow: false,
+    },
+    {
+      scanned: 50_000,
+      elapsed: 1_000,
+      lower: "2099-12-18 00:00:00.000",
+      hasRow: false,
+    },
+    {
+      scanned: 0,
+      elapsed: 12_500,
+      lower: "2099-12-18 00:00:00.000",
+      hasRow: false,
+    },
+    {
+      scanned: undefined,
+      elapsed: 1_000,
+      lower: "2099-11-27 00:00:00.000",
+      hasRow: false,
+    },
+    {
+      scanned: undefined,
+      elapsed: 1_000,
+      lower: "2099-12-18 00:00:00.000",
+      hasRow: true,
+    },
+  ])(
+    "widens sparse future windows only with measured headroom: $scanned scanned, $elapsed ms, data: $hasRow",
+    async ({ scanned, elapsed, lower, hasRow }) => {
+      const clock = vi
+        .spyOn(performance, "now")
+        .mockReturnValueOnce(0)
+        .mockReturnValue(Math.max(0, elapsed - 1_000));
+      mockQueryClickhouseWithProgress.mockImplementationOnce(
+        async function* () {
+          clock.mockReturnValue(elapsed);
+          if (scanned !== undefined) yield progressEvent(scanned);
+          if (hasRow)
+            yield rowEvent(observation("newest", "2099-12-26 00:00:00.000"));
+        },
+      );
+      mockQueryClickhouseWithProgress.mockImplementationOnce(
+        async function* () {
+          clock.mockReturnValue(24_500);
+          yield rowEvent(observation("future", "2099-12-24 00:00:00.000"));
+        },
+      );
+      const page = await getObservationsV2PageFromEventsTableForPublicApi({
+        ...boundedOpts,
+        fromStartTime: "1970-01-01T00:00:00Z",
+        toStartTime: "2100-01-01T00:00:00Z",
+      });
+      expect(page.items.map((row) => row.id)).toEqual(
+        hasRow ? ["newest", "future"] : ["future"],
+      );
+      const calls = mockQueryClickhouseWithProgress.mock.calls;
+      expect(calls).toHaveLength(2);
+      expect(calls[0][0].params.scanFrom).toBe("2099-12-25 00:00:00.000");
+      expect(calls[1][0].params.scanFrom).toBe(lower);
+      expect(calls[1][0].params.scanTo).toBe("2099-12-25 00:00:00.000");
+      expect(page.cursor?.lastStartTimeTo).toEqual(
+        new Date(lower.replace(" ", "T") + "Z"),
+      );
+    },
+  );
+
+  it("widens across sparse history and shrinks after an expensive scan", async () => {
+    const clock = vi.spyOn(performance, "now").mockReturnValue(0);
+    mockProgressQuery(rowEvent({ start_time: "1970-01-01 00:00:00.000" }));
+    mockProgressQuery(progressEvent(0));
+    mockProgressQuery(progressEvent(0));
+    mockProgressQuery(progressEvent(50_000));
+    mockQueryClickhouseWithProgress.mockImplementationOnce(async function* () {
+      clock.mockReturnValue(24_500);
+      yield progressEvent(0);
+    });
+    await getObservationsV2PageFromEventsTableForPublicApi({
+      ...baseOpts,
+      traceId: "trace-1",
+      toStartTime: "2026-10-19T00:00:00Z",
+    });
+    const scans = mockQueryClickhouseWithProgress.mock.calls.slice(1);
+    expect(scans).toHaveLength(4);
+    expect(
+      scans.map(
+        ([opts]) =>
+          (Date.parse(opts.params.scanTo.replace(" ", "T") + "Z") -
+            Date.parse(opts.params.scanFrom.replace(" ", "T") + "Z")) /
+          86_400_000,
+      ),
+    ).toEqual([7, 28, 112, 7]);
+  });
+
   it.each([
     {
       name: "typed cancellation",
       setup: () => mockProgressError(new ClickHouseQueryAbortedError()),
       assert: (error: unknown) =>
-        expect(error).toBeInstanceOf(ClickHouseQueryAbortedError),
+        expect(error).toMatchObject({ errorType: "TIMEOUT" }),
     },
     {
       name: "exception event",

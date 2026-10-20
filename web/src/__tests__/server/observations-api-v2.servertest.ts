@@ -2,6 +2,7 @@ import {
   createEvent as createEventBase,
   createEventsCh,
   createOrgProjectAndApiKey,
+  EventsQueryBuilder,
   queryClickhouse,
 } from "@langfuse/shared/src/server";
 import {
@@ -1798,6 +1799,60 @@ describe("/api/public/v2/observations API Endpoint", () => {
         params: { traceId: "CUR00254FG5s" },
       });
       expect(hash).toBe(0);
+    });
+
+    it("scans sparse future windows without clamping customer timestamps", async () => {
+      const traceId = randomUUID();
+      const olderId = randomUUID();
+      const futureId = randomUUID();
+      const from = new Date("2026-10-01T00:00:00.000Z");
+      const to = new Date("2100-02-01T00:00:00.000Z");
+      const older = new Date("2026-10-15T00:00:00.000Z");
+      const future = new Date("2099-12-15T00:00:00.000Z");
+
+      await createEventsCh([
+        createEvent({
+          id: olderId,
+          span_id: olderId,
+          project_id: projectId,
+          trace_id: traceId,
+          type: "SPAN",
+          start_time: older.getTime() * 1000,
+        }),
+        createEvent({
+          id: futureId,
+          span_id: futureId,
+          project_id: projectId,
+          trace_id: traceId,
+          type: "SPAN",
+          start_time: future.getTime() * 1000,
+        }),
+      ]);
+
+      const countQuery = new EventsQueryBuilder({ projectId })
+        .selectRaw("count() AS count")
+        .whereRaw("e.trace_id = {traceId: String}", { traceId })
+        .buildWithParams();
+
+      await waitForExpect(
+        async () => {
+          const result = await queryClickhouse<{ count: string }>(countQuery);
+          expect(Number(result[0]?.count)).toBeGreaterThanOrEqual(2);
+        },
+        5000,
+        10,
+      );
+
+      const response = await getObservations(
+        `/api/public/v2/observations?traceId=${traceId}&fields=core&limit=10&fromStartTime=${from.toISOString()}&toStartTime=${to.toISOString()}`,
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.body.data.map((row) => row.id)).toEqual([
+        futureId,
+        olderId,
+      ]);
+      expect(response.body.meta.cursor).toBeUndefined();
     });
 
     it("should apply LIMIT to query even on first request (no cursor)", async () => {
