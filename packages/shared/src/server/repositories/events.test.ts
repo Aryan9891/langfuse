@@ -313,13 +313,13 @@ describe("getObservationsV2FromEventsTableForPublicApi query shape", () => {
 
   it.each([
     {
-      scanned: 49_999,
+      scanned: 999_999,
       elapsed: 12_499,
       lower: "2099-11-27 00:00:00.000",
       hasRow: false,
     },
     {
-      scanned: 50_000,
+      scanned: 1_000_000,
       elapsed: 1_000,
       lower: "2099-12-18 00:00:00.000",
       hasRow: false,
@@ -327,6 +327,12 @@ describe("getObservationsV2FromEventsTableForPublicApi query shape", () => {
     {
       scanned: 0,
       elapsed: 12_500,
+      lower: "2099-11-27 00:00:00.000",
+      hasRow: false,
+    },
+    {
+      scanned: 0,
+      elapsed: 12_501,
       lower: "2099-12-18 00:00:00.000",
       hasRow: false,
     },
@@ -387,7 +393,7 @@ describe("getObservationsV2FromEventsTableForPublicApi query shape", () => {
     mockProgressQuery(rowEvent({ start_time: "1970-01-01 00:00:00.000" }));
     mockProgressQuery(progressEvent(0));
     mockProgressQuery(progressEvent(0));
-    mockProgressQuery(progressEvent(50_000));
+    mockProgressQuery(progressEvent(1_000_000));
     mockQueryClickhouseWithProgress.mockImplementationOnce(async function* () {
       clock.mockReturnValue(24_500);
       yield progressEvent(0);

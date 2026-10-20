@@ -198,7 +198,7 @@ import type {
 const OBSERVATIONS_SCAN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const OBSERVATIONS_SCAN_BUDGET_MS = 25_000;
 const OBSERVATIONS_SCAN_ROW_BUDGET = 5_000_000;
-const OBSERVATIONS_SPARSE_WINDOW_ROWS = 50_000;
+const OBSERVATIONS_SPARSE_WINDOW_ROWS = 1_000_000;
 
 /** xxHash32('CUR00254FG5s') = 0; with id '', the tuple excludes all boundary rows. */
 const OBSERVATIONS_TIME_CURSOR_TRACE_ID = "CUR00254FG5s";
@@ -2031,7 +2031,7 @@ function nextObservationsWindowSize(
   if (
     readRows !== undefined &&
     readRows < OBSERVATIONS_SPARSE_WINDOW_ROWS &&
-    remainingMs > OBSERVATIONS_SCAN_BUDGET_MS / 2
+    remainingMs >= OBSERVATIONS_SCAN_BUDGET_MS / 2
   ) {
     return windowMs * 4;
   }
